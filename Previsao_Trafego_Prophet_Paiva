@@ -1,0 +1,275 @@
+# 1. IMPORTAR BIBLIOTECAS
+import pandas as pd
+import numpy as np
+import seaborn as sns
+import matplotlib.pyplot as plt
+import warnings
+from prophet import Prophet
+from prophet.plot import add_changepoints_to_plot
+from prophet.plot import plot_cross_validation_metric
+from prophet.diagnostics import performance_metrics
+from prophet.diagnostics import cross_validation
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+from google.colab import drive
+warnings.filterwarnings('ignore')
+
+# Instalar pacotes
+!pip install openpyxl statsmodels pymannkendall
+
+# Importar pacotes após instalação
+import pymannkendall as mk
+
+# 2. CONECTAR AO DRIVE
+drive.mount('/content/drive')
+
+# 3. CARGA BASE DE DADOS E VERIFICAÇÃO DA QUALIDADE DOS DADOS
+
+# 3.1 Carregar a base de dados
+file_path = "/content/drive/MyDrive/Projetos_Forecasting/Prophet/BaseDados/TrafegoTotal.csv"
+df = pd.read_csv(file_path, sep=';', names=['ds', 'y'], header=0)
+
+# 3.2 Verificar e corrigir o formato das datas usando a função date_quality_check
+def date_and_value_quality_check(df, date_column, value_column):
+    # Converter todas as entradas das colunas de datas e valores para strings
+    df[date_column] = df[date_column].astype(str)
+    df[value_column] = df[value_column].astype(str)
+
+    # Criar uma lista de formatos de data comuns
+    date_formats = ['%Y-%m-%d', '%d/%m/%Y', '%m/%d/%Y', '%d-%m-%Y', '%m-%d-%Y']
+
+    # Verificar e corrigir o formato de cada data
+    for index, row in df.iterrows():
+        date_str = row[date_column]
+        for date_format in date_formats:
+            try:
+                corrected_date = pd.to_datetime(date_str, format=date_format)
+                df.at[index, date_column] = corrected_date
+                break
+            except ValueError:
+                pass
+
+    # Converter a coluna de datas para o tipo datetime
+    df[date_column] = pd.to_datetime(df[date_column])
+
+    # Converter a coluna de valores para o tipo inteiro
+    df[value_column] = pd.to_numeric(df[value_column], errors='coerce', downcast='integer')
+
+    return df
+
+df = date_and_value_quality_check(df, 'ds', 'y')
+
+# 3.3 Ordenar o DataFrame pela coluna 'ds'
+df.sort_values(by='ds', inplace=True)
+
+# 3.4 Verificar se há valores nulos
+if df.isnull().sum().sum() == 0:
+    print("Não há valores nulos no DataFrame.")
+else:
+    print("Há valores nulos no DataFrame.")
+    print(df.isnull().sum())
+
+# 3.5 Exibir as primeiras linhas do DataFrame
+print("\nPrimeiras linhas do DataFrame:")
+print(df.head())
+print()
+
+# 4. ESTATÍSTICAS DESCRITIVAS
+print("Estatísticas descritivas:")
+print(df.describe())
+
+# Valor máximo e mínimo das datas e valores
+print("\nMáximo e mínimo da coluna 'ds':")
+print(f"Máximo: {df['ds'].max()}")
+print(f"Mínimo: {df['ds'].min()}")
+
+print("\nMáximo e mínimo da coluna 'y':")
+print(f"Máximo: {df['y'].max()}")
+print(f"Mínimo: {df['y'].min()}")
+
+# 5. PLOTAR GRÁFICO DOS DADOS
+# Consolidar dados por ano
+df['ds'] = pd.to_datetime(df['ds'])
+df_yearly = df.groupby(df['ds'].dt.year)['y'].sum().reset_index()
+df_yearly['ds'] = pd.to_datetime(df_yearly['ds'], format='%Y')
+df_yearly = df_yearly.set_index('ds').resample('Y').sum().reset_index()
+
+# Plotar gráfico dos dados consolidados por ano
+plt.figure(figsize=(12, 6))
+sns.lineplot(data=df_yearly, x='ds', y='y')
+plt.title("Trafego Total Consolidado por Ano")
+plt.xlabel("Ano")
+plt.ylabel("Tráfego Total")
+plt.show()
+
+# 6. SELECIONAR DADOS DE TREINO E TESTE
+train_data = df[df['ds'] <= '2021-12-31']
+test_data = df[(df['ds'] >= '2022-01-01') & (df['ds'] <= '2022-12-31')]
+
+# Imprimir informações do período de previsão
+print("Período de previsão:")
+print(f"Início: {test_data['ds'].min().strftime('%Y-%m-%d')}")
+print(f"Fim: {test_data['ds'].max().strftime('%Y-%m-%d')}")
+
+# 7. TREINAMENTO DO MODELO E PREVISÃO
+
+# Criar uma instância do Prophet
+model = Prophet()
+# model = Prophet(weekly_seasonality=True)
+# model = Prophet(daily_seasonality=True, weekly_seasonality=True,monthly_seasonality=True)
+
+# Ajustar o modelo aos dados de treino
+model.fit(train_data)
+
+# Encontre a última data no conjunto de treinamento
+last_date = train_data['ds'].max()
+
+# Gere a sequência de datas futuras usando pd.date_range, incluindo as datas de teste
+future_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), end='2040-06-13', freq='D').union(test_data['ds'])
+
+# Crie um DataFrame com a coluna 'ds' contendo as datas futuras
+future = pd.DataFrame({'ds': future_dates})
+
+# Realizar previsões
+forecast = model.predict(future)
+print()
+forecast
+
+# Exportar para o Google Drive
+import os
+
+output_dir = '/content/drive/MyDrive/Projetos_Forecasting/Prophet/Output_Prophet_TrafegoTotal'
+if not os.path.exists(output_dir):
+    os.makedirs(output_dir)
+    
+output_path = output_dir + '/forecast.csv'
+forecast.to_csv(output_path, index=False)
+
+# 8. MÉTRICAS DE ERRO
+
+# Calcular o erro absoluto médio (MAE) nos dados de teste
+from sklearn.metrics import mean_absolute_error
+mae = mean_absolute_error(test_data['y'], forecast.loc[forecast['ds'].isin(test_data['ds']), 'yhat'])
+print(f'Mean Absolute Error: {mae:.2f}')
+
+# Calcular o RMSE (Root Mean Squared Error)
+from sklearn.metrics import mean_squared_error
+rmse = np.sqrt(mean_squared_error(test_data['y'], forecast.loc[forecast['ds'].isin(test_data['ds']), 'yhat']))
+print(f'Root Mean Squared Error: {rmse:.2f}')
+
+# Calcular o MAPE (Mean Absolute Percentage Error)
+mape = np.mean(np.abs((test_data['y'] - forecast.loc[forecast['ds'].isin(test_data['ds']), 'yhat']) / test_data['y'])) * 100
+print(f'Mean Absolute Percentage Error: {mape:.2f}%')
+
+# Criar um DataFrame com as métricas de erro
+error_metrics = pd.DataFrame({'Metric': ['MAE', 'RMSE', 'MAPE'],
+                              'Value': [mae, rmse, mape]})
+error_metrics
+
+# 9.1: Função update_and_predict
+
+def update_and_predict(model, train_data, test_data, future_dates):
+    # Criar uma nova instância do Prophet
+    new_model = Prophet()
+    
+    # Copiar os parâmetros do modelo original
+    for attr in dir(model):
+        if attr.startswith('__'):
+            continue
+        value = getattr(model, attr)
+        setattr(new_model, attr, value)
+    
+    # Atualizar o modelo com os dados de treino e teste
+    updated_data = pd.concat([train_data, test_data], ignore_index=True)
+    new_model.fit(updated_data)
+    
+    # Criar um DataFrame com a coluna 'ds' contendo as datas futuras
+    future = pd.DataFrame({'ds': future_dates})
+    
+    # Realizar previsões
+    forecast = new_model.predict(future)
+    
+    # Calcular métricas de erro
+    mae = mean_absolute_error(test_data['y'], forecast.loc[forecast['ds'].isin(test_data['ds']), 'yhat'])
+    rmse = np.sqrt(mean_squared_error(test_data['y'], forecast.loc[forecast['ds'].isin(test_data['ds']), 'yhat']))
+    
+    return mae, rmse, forecast
+    
+    # 9.2 CALCULAR MÉTRICAS DE ERRO
+
+# Calcular o erro absoluto médio (MAE) nos dados de teste
+mae = mean_absolute_error(test_data['y'], forecast.loc[forecast['ds'].isin(test_data['ds']), 'yhat'])
+
+# Calcular o erro quadrático médio (RMSE) nos dados de teste
+rmse = np.sqrt(mean_squared_error(test_data['y'], forecast.loc[forecast['ds'].isin(test_data['ds']), 'yhat']))
+
+# Verificar se há valores igual a zero na coluna 'y' dos dados de teste
+print("Valores igual a zero na coluna 'y' dos dados de teste:")
+print(test_data[test_data['y'] == 0])
+
+# Verificar se há valores nulos ou infinitos na coluna 'yhat' da previsão
+print("\nValores nulos ou infinitos na coluna 'yhat' da previsão:")
+print(forecast[forecast['yhat'].isnull() | np.isinf(forecast['yhat'])])
+
+# Se não houver valores iguais a zero nos dados de teste ou valores nulos/infinitos nas previsões,
+# prossiga com o cálculo do MAPE
+test_indices = test_data['ds'].isin(forecast['ds'])
+forecast_indices = forecast['ds'].isin(test_data['ds'])
+
+y_true_filtered = test_data.loc[test_indices, 'y']
+y_pred_filtered = forecast.loc[forecast_indices, 'yhat']
+
+errors = np.abs((y_true_filtered.values - y_pred_filtered.values) / y_true_filtered.values)
+errors_mask = y_true_filtered.values != 0
+mape = (errors[errors_mask]).mean() * 100
+
+# Exibir métricas de erro
+print(f'\nMean Absolute Error: {mae:.2f}')
+print(f'Root Mean Squared Error: {rmse:.2f}')
+print(f'Mean Absolute Percentage Error: {mape:.2f}%')
+
+# 10. Plotar a série histórica e a previsão
+plt.figure(figsize=(12, 6))
+plt.plot(df['ds'], df['y'], label='Série histórica', color='blue')
+plt.plot(forecast['ds'], forecast['yhat'], label='Previsão', color='red')
+plt.fill_between(forecast['ds'], forecast['yhat_lower'], forecast['yhat_upper'], alpha=0.2, color='gray')
+plt.legend(loc='upper left')
+plt.title('Previsão de tráfego')
+plt.xlabel('Data')
+plt.ylabel('Tráfego')
+plt.show()
+print()
+print("Período de previsão:")
+print(f"Início: {test_data['ds'].min().strftime('%Y-%m-%d')}")
+print(f"Fim: {test_data['ds'].max().strftime('%Y-%m-%d')}")
+
+# 11. GERAR TABELA COM DADOS DE TRÁFEGO REAL E PREVISTO
+# Criar DataFrame com todas as datas do projeto
+all_dates = pd.date_range(start='2010-06-11', end='2040-06-13')
+df_all_dates = pd.DataFrame({'ds': all_dates})
+
+# Realizar previsão para todas as datas do projeto
+forecast_all_dates = model.predict(df_all_dates)
+
+# Criar DataFrame com as colunas 'ds', 'y' e 'yhat'
+df_traffic = pd.DataFrame({'ds': all_dates, 'y': np.nan, 'yhat': np.nan})
+
+# Preencher coluna 'y' com os valores reais de tráfego
+df_traffic.loc[df_traffic['ds'].isin(df['ds']), 'y'] = df.loc[df['ds'].isin(df_traffic['ds']), 'y'].values
+
+# Preencher coluna 'yhat' com os valores previstos de tráfego
+df_traffic.loc[forecast_all_dates['ds'].isin(all_dates), 'yhat'] = forecast_all_dates.loc[forecast_all_dates['ds'].isin(all_dates), 'yhat'].values
+
+# Exibir DataFrame com dados de tráfego real e previsto
+print(df_traffic)
+
+# Exportar para o Google Drive
+output_dir = '/content/drive/MyDrive/Projetos_Forecasting/Prophet/Output_Prophet_TrafegoTotal'
+if not os.path.exists(output_dir):
+    os.makedirs(output_dir)
+    
+output_path = output_dir + '/df_traffic.xlsx'
+df_traffic.to_excel(output_path, index=False)
+
+# Fazer download do arquivo para o computador local
+from google.colab import files
+files.download(output_path)
